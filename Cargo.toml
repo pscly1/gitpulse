@@ -1,0 +1,16 @@
+[package]
+name = "gitpulse"
+version = "0.2.0"
+edition = "2021"
+description = "Read a git repository's pulse: commit rhythm, streak, churn, and busiest hours — no dependencies."
+license = "MIT"
+authors = ["pscly1"]
+repository = "https://github.com/pscly1/gitpulse"
+keywords = ["git", "cli", "statistics", "productivity"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "gitpulse"
+path = "src/main.rs"
+
+[dependencies]
