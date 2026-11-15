@@ -21,6 +21,11 @@ by weekday
   Sat    230  ██████████████████████████
   Sun    245  ███████████████████████████
 
+by month
+  2024-10     77  █████
+  2024-11    275  █████████████████
+  2024-12    378  ████████████████████████
+
 by hour (local time of each commit)
   09:00     71  ████████████████
   14:00    140  ████████████████████████████████
@@ -94,6 +99,9 @@ gitpulse . --json | jq .longest_streak
 - **Binary files are skipped** in churn (`-\t-` lines) instead of counting as zero-change edits.
 - **Streaks use real calendar arithmetic** (days-from-civil), so month and leap-year boundaries do
   not break a run.
+- **Unparseable records are reported, not hidden.** If a log record cannot be read, the output says
+  `skipped N unparseable log record(s)` and `--json` carries `omitted_records`, so a surprising
+  number is visible instead of silently shrinking the totals.
 
 ## Tests
 
@@ -101,8 +109,9 @@ gitpulse . --json | jq .longest_streak
 cargo test
 ```
 
-Ten unit tests cover the record parser (including the separator edge case and binary files), the
-weekday mapping, streak maths across Feb 29, heaviest-commit ranking, and JSON shape.
+Twelve unit tests cover the record parser (including the separator edge case and binary files), the
+weekday mapping, streak maths across Feb 29, heaviest-commit ranking, monthly grouping,
+dropped-record accounting, and JSON shape.
 
 ## License
 

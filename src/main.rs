@@ -32,6 +32,8 @@ struct Report {
     total: usize,
     heaviest: Vec<(String, usize, usize)>, // (short hash, files touched, changed lines)
     files_touched: usize,
+    months: Vec<(String, usize)>, // "YYYY-MM" -> commits, sorted
+    omissions: usize,             // commits whose weekday could not be read
     insertions: usize,
     deletions: usize,
     by_weekday: [usize; 7],
@@ -126,16 +128,27 @@ fn parse_record(record: &str) -> Option<Commit> {
     })
 }
 
-fn parse_log(stdout: &str) -> Vec<Commit> {
-    stdout
-        .split('\u{1e}')
-        .filter_map(parse_record)
-        .collect()
+/// Parse the whole log. Returns the commits plus how many records were dropped
+/// as unparseable — a repo with odd history should say so rather than lie.
+fn parse_log(stdout: &str) -> (Vec<Commit>, usize) {
+    let mut commits = Vec::new();
+    let mut dropped = 0usize;
+    for record in stdout.split('\u{1e}') {
+        if record.trim().is_empty() {
+            continue;
+        }
+        match parse_record(record) {
+            Some(c) => commits.push(c),
+            None => dropped += 1,
+        }
+    }
+    (commits, dropped)
 }
 
-fn build_report(commits: &[Commit]) -> Report {
+fn build_report_with_omissions(commits: &[Commit], dropped: usize) -> Report {
     let mut r = Report {
         total: commits.len(),
+        omissions: dropped,
         ..Default::default()
     };
     let mut days: HashMap<String, usize> = HashMap::new();
@@ -183,6 +196,28 @@ fn build_report(commits: &[Commit]) -> Report {
     r.top_days = top;
 
     r.files_touched = commits.iter().map(|c| c.files).sum();
+
+    let mut months: HashMap<String, usize> = HashMap::new();
+    let mut month_keys: Vec<String> = Vec::new();
+    for c in commits {
+        if let Some(date) = c.timestamp.split_whitespace().next() {
+            let month = date.chars().take(7).collect::<String>();
+            if month.len() == 7 {
+                if !months.contains_key(&month) {
+                    month_keys.push(month.clone());
+                }
+                *months.entry(month).or_insert(0) += 1;
+            }
+        }
+    }
+    month_keys.sort();
+    r.months = month_keys
+        .into_iter()
+        .map(|m| {
+            let n = months[&m];
+            (m, n)
+        })
+        .collect();
     let mut heavy: Vec<(String, usize, usize)> = commits
         .iter()
         .map(|c| (c.hash.chars().take(8).collect::<String>(), c.files, c.churn()))
@@ -255,6 +290,12 @@ fn render(r: &Report, top_n: usize, graph: bool) -> String {
         r.longest_streak, r.current_streak
     ));
     out.push_str(&format!("files touched   {}\n", r.files_touched));
+    if r.omissions > 0 {
+        out.push_str(&format!(
+            "skipped         {} unparseable log record(s)\n",
+            r.omissions
+        ));
+    }
 
     let names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     let max_wd = *r.by_weekday.iter().max().unwrap_or(&0);
@@ -280,6 +321,14 @@ fn render(r: &Report, top_n: usize, graph: bool) -> String {
                 r.by_hour[h],
                 bar(r.by_hour[h], max_h, 30)
             ));
+        }
+    }
+
+    if !r.months.is_empty() {
+        let max_m = r.months.iter().map(|(_, n)| *n).max().unwrap_or(0);
+        out.push_str("\nby month\n");
+        for (month, n) in &r.months {
+            out.push_str(&format!("  {month}  {:>5}  {}\n", n, bar(*n, max_m, 24)));
         }
     }
 
@@ -320,9 +369,9 @@ fn render_json(r: &Report, top_n: usize) -> String {
     format!(
         "{{\n  \"commits\": {},\n  \"distinct_days\": {},\n  \"first_date\": \"{}\",\n  \
          \"last_date\": \"{}\",\n  \"insertions\": {},\n  \"deletions\": {},\n  \
-         \"total_churn\": {},\n  \"files_touched\": {},\n  \"longest_streak\": {},\n  \
+         \"total_churn\": {},\n  \"files_touched\": {},\n  \"omitted_records\": {},\n  \"longest_streak\": {},\n  \
          \"current_streak\": {},\n  \"by_weekday\": [{}],\n  \"by_hour\": [{}],\n  \
-         \"busiest_days\": [{}],\n  \"heaviest_commits\": [{}]\n}}",
+         \"busiest_days\": [{}],\n  \"heaviest_commits\": [{}],\n  \"months\": {{{}}}\n}}",
         r.total,
         r.distinct_days,
         json_escape(&r.first_date),
@@ -331,13 +380,24 @@ fn render_json(r: &Report, top_n: usize) -> String {
         r.deletions,
         total_churn(r),
         r.files_touched,
+        r.omissions,
         r.longest_streak,
         r.current_streak,
         wd.join(","),
         hr.join(","),
         days.join(","),
-        heavy_json(r, top_n)
+        heavy_json(r, top_n),
+        months_json(r)
     )
+}
+
+/// Per-month commit counts as a JSON object.
+fn months_json(r: &Report) -> String {
+    r.months
+        .iter()
+        .map(|(m, n)| format!("\"{}\":{}", json_escape(m), n))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Heaviest commits as a JSON array.
@@ -453,12 +513,12 @@ fn main() {
         }
     };
 
-    let commits = parse_log(&stdout);
+    let (commits, dropped) = parse_log(&stdout);
     if commits.is_empty() {
         println!("no commits found in {path}");
         return;
     }
-    let report = build_report(&commits);
+    let report = build_report_with_omissions(&commits, dropped);
     if json {
         println!("{}", render_json(&report, top_n));
     } else {
@@ -469,6 +529,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Convenience wrapper for tests that do not care about dropped records.
+    fn build_report(commits: &[Commit]) -> Report {
+        build_report_with_omissions(commits, 0)
+    }
 
     #[test]
     fn parses_a_single_record() {
@@ -488,8 +553,9 @@ mod tests {
     fn parses_multiple_records() {
         let raw = "\u{1e}a\u{1f}1|2026-01-05|09:00:00\n1\t0\tf\
                    \u{1e}b\u{1f}2|2026-01-06|10:00:00\n0\t1\tg";
-        let commits = parse_log(raw);
+        let (commits, dropped) = parse_log(raw);
         assert_eq!(commits.len(), 2);
+        assert_eq!(dropped, 0);
         assert_eq!(commits[1].weekday, 1);
         assert_eq!(commits[1].hour, 10);
         assert_eq!(commits[1].insertions, 0);
@@ -498,7 +564,9 @@ mod tests {
 
     #[test]
     fn skips_records_without_hash() {
-        assert!(parse_log("\u{1e}\u{1f}1|2026-01-05|09:00:00").is_empty());
+        let (commits, dropped) = parse_log("\u{1e}\u{1f}1|2026-01-05|09:00:00");
+        assert!(commits.is_empty());
+        assert_eq!(dropped, 1);
     }
 
     #[test]
@@ -555,6 +623,39 @@ mod tests {
         let r = Report::default();
         let out = render(&r, 5, true);
         assert!(out.contains("commits         0"));
+    }
+
+    #[test]
+    fn reports_dropped_records_instead_of_hiding_them() {
+        let raw = "\u{1e}h1\u{1f}1|2026-01-05|09:00:00\n1\t0\ta\u{1e}\u{1f}garbage";
+        let (commits, dropped) = parse_log(raw);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(dropped, 1);
+        let r = build_report_with_omissions(&commits, dropped);
+        assert_eq!(r.omissions, 1);
+        assert!(render(&r, 0, false).contains("skipped         1 unparseable"));
+        assert!(render_json(&r, 0).contains("\"omitted_records\": 1"));
+    }
+
+    #[test]
+    fn groups_commits_by_month() {
+        let mk = |ts: &str| Commit {
+            hash: "h".into(),
+            timestamp: ts.into(),
+            weekday: 1,
+            hour: 9,
+            files: 1,
+            insertions: 1,
+            deletions: 0,
+        };
+        let commits = vec![
+            mk("2026-01-10 09:00:00"),
+            mk("2026-01-20 09:00:00"),
+            mk("2026-02-01 09:00:00"),
+        ];
+        let r = build_report(&commits);
+        assert_eq!(r.months, vec![("2026-01".to_string(), 2), ("2026-02".to_string(), 1)]);
+        assert!(render_json(&r, 0).contains("\"months\": {\"2026-01\":2,\"2026-02\":1}"));
     }
 
     #[test]
